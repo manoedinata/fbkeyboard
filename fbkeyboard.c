@@ -29,9 +29,11 @@
 #include <linux/input.h>
 #include <linux/uinput.h>
 #include <linux/vt.h>
+#include <sys/mman.h>
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
+unsigned char *fbmem = NULL;
 volatile sig_atomic_t done = 0;
 
 char *font = "/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf";
@@ -121,7 +123,7 @@ void fill_rect(int x, int y, int w, int h, int color)
 	for (i = 0; i < h; i++) {
 		line = (int32_t *) (buf + linelength * (y + i));
 		for (j = 0; j < w; j++) {
-			*(line + x + j) = color;
+			*(line + x + j) = color | 0xff000000; /* force opaque alpha for ARGB8888 decon layer */
 		}
 	}
 }
@@ -190,6 +192,8 @@ void draw_char(int x, int y, char c)
 				  (j + x) * 4 + 1) = color;
 				*(buf + linelength * (i + y) +
 				  (j + x) * 4 + 2) = color;
+				*(buf + linelength * (i + y) +
+				  (j + x) * 4 + 3) = 0xff; /* force opaque alpha for ARGB8888 decon layer */
 			}
 		}
 }
@@ -300,25 +304,24 @@ void draw_keyboard(int row, int pressed)
 
 void show_fbkeyboard(int fbfd)
 {
+	(void) fbfd;
+	/* writes now go through the mmapped fbmem instead of lseek+write:
+	   this fb char device silently no-ops plain read/write syscalls. */
 	switch (rotate) {
 		case FB_ROTATE_UR:
-			lseek(fbfd, fblinelength * (fbheight - height * 5), SEEK_SET);
-			write(fbfd, buf, buflen);
+			memcpy(fbmem + fblinelength * (fbheight - height * 5), buf, buflen);
 			break;
 		case FB_ROTATE_UD:
-			lseek(fbfd, 0, SEEK_SET);
-			write(fbfd, buf, buflen);
+			memcpy(fbmem, buf, buflen);
 			break;
 		case FB_ROTATE_CW:
 			for (int i = 0; i < width; i++) {
-				lseek(fbfd, fblinelength * i, SEEK_SET);
-				write(fbfd, (int32_t *) (buf + linelength * i), linelength);
+				memcpy(fbmem + fblinelength * i, buf + linelength * i, linelength);
 			}
 			break;
 		case FB_ROTATE_CCW:
 			for (int i = 0; i < width; i++) {
-				lseek(fbfd, fblinelength * i + (fbwidth - height * 5) * 4, SEEK_SET);
-				write(fbfd, (int32_t *) (buf + linelength * i), linelength);
+				memcpy(fbmem + fblinelength * i + (fbwidth - height * 5) * 4, buf + linelength * i, linelength);
 			}
 			break;
 	}
@@ -613,6 +616,11 @@ int main(int argc, char *argv[])
 	fbwidth = vinfo.xres;
 	fbheight = vinfo.yres;
 	fblinelength = finfo.line_length;
+	fbmem = mmap(NULL, finfo.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fbfd, 0);
+	if (fbmem == MAP_FAILED) {
+		perror("error: mmap of framebuffer device failed");
+		exit(-1);
+	}
 	switch (rotate) {
 		case FB_ROTATE_UR:
 		case FB_ROTATE_UD:
